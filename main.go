@@ -1,16 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/Shamiul-isl/chirpy/internal/database"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
-	fileserverHits atomic.Int32
+	fileserverHits  atomic.Int32
+	DatabaseQueries *database.Queries
 }
 
 type returnError struct {
@@ -84,7 +92,16 @@ func cleanBody(str string) string {
 }
 
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dbQueries := database.New(db)
+
 	apiCfg := apiConfig{}
+	apiCfg.DatabaseQueries = dbQueries
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.Handle("/assets", http.FileServer(http.Dir("./assets")))
