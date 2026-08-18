@@ -9,8 +9,10 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Shamiul-isl/chirpy/internal/database"
+	"github.com/google/uuid"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -19,6 +21,7 @@ import (
 type apiConfig struct {
 	fileserverHits  atomic.Int32
 	DatabaseQueries *database.Queries
+	Platform        string
 }
 
 type returnError struct {
@@ -48,6 +51,17 @@ func (cfg *apiConfig) GetMetrics() http.Handler {
 
 func (cfg *apiConfig) ResetMetrics() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cfg.Platform != "dev" {
+			log.Fatal("Can't delete users from non local environment")
+			w.WriteHeader(403)
+			return
+		}
+
+		err := cfg.DatabaseQueries.DeleteUsers(r.Context())
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(200)
 		cfg.fileserverHits.Store(0)
@@ -94,6 +108,7 @@ func cleanBody(str string) string {
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
@@ -102,6 +117,7 @@ func main() {
 
 	apiCfg := apiConfig{}
 	apiCfg.DatabaseQueries = dbQueries
+	apiCfg.Platform = platform
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.Handle("/assets", http.FileServer(http.Dir("./assets")))
@@ -134,6 +150,52 @@ func main() {
 			// log.Printf("%s", param.Body)
 			respondWithJson(w, 200, returnVal{Cleaned: cleanBody(param.Body)})
 		}
+	})
+	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
+		type parameter struct {
+			Email string `json:"email"`
+		}
+
+		type User struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Email     string    `json:"email"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		param := parameter{}
+		err := decoder.Decode(&param)
+		if err != nil {
+			log.Printf("Error decoding parameter: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		user, err := apiCfg.DatabaseQueries.CreateUser(r.Context(), param.Email)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+
+		returnuser := User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		}
+		ru, err := json.Marshal(returnuser)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(201)
+		w.Write(ru)
+
 	})
 	server := &http.Server{
 		Addr:    ":8080",
