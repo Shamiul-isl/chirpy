@@ -24,14 +24,6 @@ type apiConfig struct {
 	Platform        string
 }
 
-type returnError struct {
-	Error string `json:"error"`
-}
-
-type returnVal struct {
-	Cleaned string `json:"cleaned_body"`
-}
-
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	// cfg.fileserverHits.Add(1)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,8 +36,8 @@ func (cfg *apiConfig) GetMetrics() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(200)
-		w.Write([]byte(fmt.Sprintf(
-			"<html> <body> <h1>Welcome, Chirpy Admin</h1> <p>Chirpy has been visited %d times!</p> </body> </html>", cfg.fileserverHits.Load())))
+		fmt.Fprintf(w,
+			"<html> <body> <h1>Welcome, Chirpy Admin</h1> <p>Chirpy has been visited %d times!</p> </body> </html>", cfg.fileserverHits.Load())
 	})
 }
 
@@ -67,29 +59,6 @@ func (cfg *apiConfig) ResetMetrics() http.Handler {
 		cfg.fileserverHits.Store(0)
 		// w.Write([]byte(fmt.Sprintf("Hits: %d", cfg.fileserverHits.Load())))
 	})
-}
-
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-	returnerr := returnError{Error: msg}
-	dat, err := json.Marshal(returnerr)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.WriteHeader(code)
-	w.Write(dat)
-}
-
-func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
-	dat, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-	w.WriteHeader(code)
-	w.Write(dat)
 }
 
 func cleanBody(str string) string {
@@ -128,29 +97,6 @@ func main() {
 	})
 	mux.Handle("GET /admin/metrics", apiCfg.GetMetrics())
 	mux.Handle("POST /admin/reset", apiCfg.ResetMetrics())
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-		type parameter struct {
-			Body string `json:"body"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		param := parameter{}
-		err := decoder.Decode(&param)
-		if err != nil {
-			log.Printf("Error decoding parameter: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		if len(param.Body) > 140 {
-			respondWithError(w, 400, "Chirp is too long")
-		} else {
-			// log.Printf("%s", param.Body)
-			respondWithJson(w, 200, returnVal{Cleaned: cleanBody(param.Body)})
-		}
-	})
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type parameter struct {
 			Email string `json:"email"`
@@ -197,6 +143,155 @@ func main() {
 		w.Write(ru)
 
 	})
+
+	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		type parameter struct {
+			Body   string    `json:"body"`
+			Userid uuid.UUID `json:"user_id"`
+		}
+
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			Userid    uuid.UUID `json:"user_id"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		param := parameter{}
+		err := decoder.Decode(&param)
+		if err != nil {
+			log.Printf("Error decoding parameter: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if len(param.Body) > 140 {
+			log.Fatal("Chirp is too long! Need to be less than 140 characters")
+			w.WriteHeader(500)
+			return
+		}
+		param.Body = cleanBody(param.Body)
+
+		chirp, err := apiCfg.DatabaseQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+			Body:   param.Body,
+			UserID: uuid.NullUUID{UUID: param.Userid, Valid: true},
+		})
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+
+		returnchirp := Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			Userid:    chirp.UserID.UUID,
+		}
+		ru, err := json.Marshal(returnchirp)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(201)
+		w.Write(ru)
+
+	})
+
+	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			Userid    uuid.UUID `json:"user_id"`
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		chirps, err := apiCfg.DatabaseQueries.GetAllChirps(r.Context())
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+
+		allChirps := []Chirp{}
+
+		for _, c := range chirps {
+			newchirp := Chirp{
+				ID:        c.ID,
+				CreatedAt: c.CreatedAt,
+				UpdatedAt: c.UpdatedAt,
+				Body:      c.Body,
+				Userid:    c.UserID.UUID,
+			}
+
+			allChirps = append(allChirps, newchirp)
+		}
+
+		ru, err := json.Marshal(allChirps)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write(ru)
+
+	})
+
+	mux.HandleFunc("GET /api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
+		type Chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			Userid    uuid.UUID `json:"user_id"`
+		}
+
+		getID, err := uuid.Parse(r.PathValue("chirpID"))
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		chirp, err := apiCfg.DatabaseQueries.GetChirp(r.Context(), getID)
+		if err != nil {
+			// log.Fatal(err)
+			log.Println(err)
+			w.WriteHeader(404)
+			return
+		}
+
+		newchirp := Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			Userid:    chirp.UserID.UUID,
+		}
+
+		ru, err := json.Marshal(newchirp)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write(ru)
+
+	})
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
