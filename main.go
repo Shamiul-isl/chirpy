@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Shamiul-isl/chirpy/internal/auth"
 	"github.com/Shamiul-isl/chirpy/internal/database"
 	"github.com/google/uuid"
 
@@ -99,7 +100,8 @@ func main() {
 	mux.Handle("POST /admin/reset", apiCfg.ResetMetrics())
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type parameter struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
 		}
 
 		type User struct {
@@ -120,7 +122,17 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 
-		user, err := apiCfg.DatabaseQueries.CreateUser(r.Context(), param.Email)
+		password, err := auth.HashPassword(param.Password)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+
+		user, err := apiCfg.DatabaseQueries.CreateUser(r.Context(), database.CreateUserParams{
+			Email:          param.Email,
+			HashedPassword: password,
+		})
 		if err != nil {
 			log.Fatal(err)
 			w.WriteHeader(500)
@@ -142,6 +154,67 @@ func main() {
 		w.WriteHeader(201)
 		w.Write(ru)
 
+	})
+
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		type parameter struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		type User struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Email     string    `json:"email"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		param := parameter{}
+		err := decoder.Decode(&param)
+		if err != nil {
+			log.Printf("Error decoding parameter: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		user, err := apiCfg.DatabaseQueries.GetUserByEmail(r.Context(), param.Email)
+		if err != nil {
+			log.Println(err)
+			w.WriteHeader(401)
+			w.Write([]byte("Incorrect email or password"))
+			return
+		}
+
+		valid, err := auth.CheckPasswordHash(param.Password, user.HashedPassword)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		if !valid {
+			log.Println(err)
+			w.WriteHeader(401)
+			w.Write([]byte("Incorrect email or password"))
+			return
+		}
+
+		returnuser := User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		}
+		ru, err := json.Marshal(returnuser)
+		if err != nil {
+			log.Fatal(err)
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write(ru)
 	})
 
 	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
